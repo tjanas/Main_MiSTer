@@ -39,8 +39,12 @@
 static char core_path[1024] = {};
 static char rbf_path[1024] = {};
 
-static fileTYPE sd_image[4] = {};
-static uint64_t buffer_lba[4] = { ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,ULLONG_MAX };
+static fileTYPE sd_image[16] = {};
+static int      sd_image_cangrow[16] = {};
+static uint64_t buffer_lba[16] = { ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,
+								   ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,
+								   ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,
+								   ULLONG_MAX,ULLONG_MAX,ULLONG_MAX,ULLONG_MAX };
 
 static int use_save = 0;
 
@@ -391,12 +395,12 @@ int user_io_get_joy_transl()
 static int use_cheats = 0;
 static uint32_t ss_base = 0;
 static uint32_t ss_size = 0;
-static uint32_t uart_speeds[12] = {};
-static char uart_speed_labels[12][32] = {};
-static uint32_t midi_speeds[12] = {};
-static char midi_speed_labels[12][32] = {};
-static const uint32_t mlink_speeds[12] = { 110, 300, 600, 1200, 2400, 9600, 14400, 19200, 31250, 38400, 57600, 115200 };
-static const char mlink_speed_labels[12][32] = { "110", "300", "600", "1200", "2400", "9600", "14400", "19200", "31250/MIDI", "38400", "57600", "115200" };
+static uint32_t uart_speeds[13] = {};
+static char uart_speed_labels[13][32] = {};
+static uint32_t midi_speeds[13] = {};
+static char midi_speed_labels[13][32] = {};
+static const uint32_t mlink_speeds[13] = { 110, 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 31250, 38400, 57600, 115200 };
+static const char mlink_speed_labels[13][32] = { "110", "300", "600", "1200", "2400", "4800", "9600", "14400", "19200", "31250/MIDI", "38400", "57600", "115200" };
 static char defmra[1024] = {};
 
 static void parse_config()
@@ -528,7 +532,7 @@ static void parse_config()
 		{
 			if (!strncmp(p, "DEFMRA,", 7))
 			{
-				snprintf(defmra, sizeof(defmra), "%s/_Arcades/%s", getRootDir(), p + 7);
+				snprintf(defmra, sizeof(defmra), (p[7] == '/') ? "%s%s" : "%s/_Arcades/%s", getRootDir(), p + 7);
 			}
 			else if (!strncmp(p, "DIP", 3))
 			{
@@ -622,9 +626,11 @@ static void parse_config()
 			{
 				static char str[1024];
 				sprintf(str, "%s.f%c", user_io_get_core_name(), p[2]);
-				if (FileLoadConfig(str, str, sizeof(str)))
+				if (FileLoadConfig(str, str, sizeof(str)) && str[0])
 				{
-					user_io_file_tx(str, p[2] - '0');
+					int idx = p[2] - '0';
+					StoreIdx_F(idx, str);
+					user_io_file_tx(str, idx);
 				}
 			}
 		}
@@ -830,7 +836,7 @@ uint32_t ValidateUARTbaud(int mode, uint32_t baud)
 {
 	const uint32_t *bauds = GetUARTbauds(mode);
 	int idx = 0;
-	for (int i = 0; i < 12; i++)
+	for (int i = 0; i < 13; i++)
 	{
 		if (!bauds[i]) break;
 		if (bauds[i] == baud)
@@ -1019,19 +1025,6 @@ void user_io_init(const char *path, const char *xml)
 		arcade_override_name(xml);
 	}
 
-	user_io_read_confstr();
-	user_io_read_core_name();
-	parse_config();
-	if (!xml && defmra[0] && FileExists(defmra))
-	{
-		// attn: FC option won't use name from defmra!
-		xml = (const char*)defmra;
-		strcpy(core_path, xml);
-		is_arcade_type = 1;
-		arcade_override_name(xml);
-		printf("Using default MRA: %s\n", xml);
-	}
-
 	if (core_type == CORE_TYPE_8BIT)
 	{
 		printf("Identified 8BIT core");
@@ -1043,6 +1036,19 @@ void user_io_init(const char *path, const char *xml)
 	else if (core_type == CORE_TYPE_SHARPMZ)
 	{
 		user_io_set_core_name("sharpmz");
+	}
+
+	user_io_read_confstr();
+	user_io_read_core_name();
+	parse_config();
+	if (!xml && defmra[0] && FileExists(defmra))
+	{
+		// attn: FC option won't use name from defmra!
+		xml = (const char*)defmra;
+		strcpy(core_path, xml);
+		is_arcade_type = 1;
+		arcade_override_name(xml);
+		printf("Using default MRA: %s\n", xml);
 	}
 
 	cfg_parse();
@@ -1340,42 +1346,6 @@ void user_io_sd_set_config(void)
 */
 }
 
-// read 8+32 bit sd card status word from FPGA
-uint16_t user_io_sd_get_status(uint32_t *lba, uint16_t *req_type)
-{
-	uint32_t s;
-	uint16_t c;
-	uint16_t req = 0;
-
-	spi_uio_cmd_cont(UIO_GET_SDSTAT);
-	if (io_ver)
-	{
-		c = spi_w(0);
-		s = spi_w(0);
-		s = (s & 0xFFFF) | (((uint32_t)spi_w(0))<<16);
-		req = spi_w(0);
-	}
-	else
-	{
-		//note: using 32bit big-endian transfer!
-		c = spi_in();
-		s = spi_in();
-		s = (s << 8) | spi_in();
-		s = (s << 8) | spi_in();
-		s = (s << 8) | spi_in();
-		req = spi_in();
-	}
-	DisableIO();
-
-	if (lba)
-		*lba = s;
-
-	if (req)
-		*req_type = req;
-
-	return c;
-}
-
 // read 8 bit keyboard LEDs status from FPGA
 uint16_t user_io_kbdled_get_status(void)
 {
@@ -1518,6 +1488,8 @@ int user_io_file_mount(const char *name, unsigned char index, char pre)
 	int writable = 0;
 	int ret = 0;
 	int len = strlen(name);
+
+	sd_image_cangrow[index] = (pre != 0);
 
 	if (len)
 	{
@@ -2619,175 +2591,213 @@ void user_io_poll()
 	{
 		if (is_st()) tos_poll();
 
-		while (1)
+		for (int i = 0; i < 4; i++)
 		{
-			const int buf_sz = 16;
-			static uint8_t buffer[4][buf_sz * 512];
-			uint32_t lba;
-			uint16_t req_type = 0;
-			uint16_t c = user_io_sd_get_status(&lba, &req_type);
-			//if(c&3) printf("user_io_sd_get_status: cmd=%02x, lba=%08x\n", c, lba);
+			int disk = -1;
+			int ack = 0;
+			int op = 0;
+			static uint8_t buffer[16][16384];
+			uint64_t lba;
+			uint32_t blkpow = 9;
+			uint32_t sz = 512;
+			uint32_t blksz = 1;
 
-			// valid sd commands start with "5x" to avoid problems with
-			// cores that don't implement this command
-			if ((c & 0xf0) == 0x50)
+			uint16_t c = spi_uio_cmd_cont(UIO_GET_SDSTAT);
+			if (c & 0x8000)
 			{
-				// check if core requests configuration
-				if ((c & 0xC) == 0xC)
+				disk = (c >> 2) & 0xF;
+				op = c & 3;
+				ack = disk << 8;
+				spi_w(0);
+				lba = spi_w(0);
+				lba = (lba & 0xFFFF) | (((uint32_t)spi_w(0)) << 16);
+				blkpow = 7 + ((c >> 6) & 7);
+				blksz = (((c >> 9) & 0x3F) + 1);
+				sz = blksz << blkpow;
+				if (sz > sizeof(buffer[0]))
 				{
-					printf("core requests SD config\n");
-					user_io_sd_set_config();
+					sz = sizeof(buffer[0]);
+					blksz = sz >> blkpow;
 				}
-
-				if (c & 0x3802)
+				//if (op) printf("c=%X, op=%d, blkpow=%d, sz=%d, lba=%llu, disk=%d\n", c, op, blkpow, sz, lba, disk);
+			}
+			else
+			{
+				c = spi_w(0);
+				if ((c & 0xf0) == 0x50 && (c & 0x3F03))
 				{
-					int disk = 3;
-					if (c & 0x0002) disk = 0;
-					else if (c & 0x0800) disk = 1;
-					else if (c & 0x1000) disk = 2;
+					lba = spi_w(0);
+					lba = (lba & 0xFFFF) | (((uint32_t)spi_w(0)) << 16);
 
-					//printf("SD WR %d on %d\n", lba, disk);
-
-					if (use_save) menu_process_save();
-
-					buffer_lba[disk] = -1;
-
-					// Fetch sector data from FPGA ...
-					EnableIO();
-					spi_w(UIO_SECTOR_WR | ((c & 4) ? 0 : ((disk + 1) << 8)));
-					spi_block_read(buffer[disk], fio_size);
-					DisableIO();
-
-					if (sd_image[disk].type == 2 && !lba)
+					// check if core requests configuration
+					if ((c & 0xC) == 0xC)
 					{
-						//Create the file
-						if (FileOpenEx(&sd_image[disk], sd_image[disk].path, O_CREAT | O_RDWR | O_SYNC))
+						printf("core requests SD config\n");
+						user_io_sd_set_config();
+					}
+
+					if (c & 0x0003)
+					{
+						disk = 0;
+						op = (c & 1) ? 1 : 2;
+					}
+					else if (c & 0x0900)
+					{
+						disk = 1;
+						op = (c & 0x100) ? 1 : 2;
+					}
+					else if (c & 0x1200)
+					{
+						disk = 2;
+						op = (c & 0x200) ? 1 : 2;
+					}
+					else if (c & 0x2400)
+					{
+						disk = 3;
+						op = (c & 0x400) ? 1 : 2;
+					}
+
+					ack = ((c & 4) ? 0 : ((disk + 1) << 8));
+				}
+			}
+			DisableIO();
+
+			if (op == 2)
+			{
+				//printf("SD WR %d on %d\n", lba, disk);
+
+				if (use_save) menu_process_save();
+
+				buffer_lba[disk] = -1;
+
+				// Fetch sector data from FPGA ...
+				EnableIO();
+				spi_w(UIO_SECTOR_WR | ack);
+				spi_block_read(buffer[disk], fio_size, sz);
+				DisableIO();
+
+				if (sd_image[disk].type == 2 && !lba)
+				{
+					//Create the file
+					if (FileOpenEx(&sd_image[disk], sd_image[disk].path, O_CREAT | O_RDWR | O_SYNC))
+					{
+						diskled_on();
+						if (FileWriteSec(&sd_image[disk], buffer[disk]))
 						{
-							diskled_on();
-							if (FileWriteSec(&sd_image[disk], buffer[disk]))
-							{
-								sd_image[disk].size = 512;
-							}
-						}
-						else
-						{
-							printf("Error in creating file: %s\n", sd_image[disk].path);
+							sd_image[disk].size = sz;
 						}
 					}
 					else
 					{
-						// ... and write it to disk
-						__off64_t size = sd_image[disk].size >> 9;
-						if (size && size >= lba)
+						printf("Error in creating file: %s\n", sd_image[disk].path);
+					}
+				}
+				else
+				{
+					// ... and write it to disk
+					uint64_t size = sd_image[disk].size >> blkpow;
+					if (size && lba <= size)
+					{
+						diskled_on();
+						if (FileSeek(&sd_image[disk], lba << blkpow, SEEK_SET))
 						{
-							diskled_on();
-							if (FileSeekLBA(&sd_image[disk], lba))
+							if (!sd_image_cangrow[disk])
 							{
-								if (FileWriteSec(&sd_image[disk], buffer[disk]))
-								{
-									if (size == lba)
-									{
-										size++;
-										sd_image[disk].size = size << 9;
-									}
-								}
+								__off64_t rem = sd_image[disk].size - sd_image[disk].offset;
+								sz = (rem >= sz) ? sz : (int)rem;
 							}
+
+							if (sz) FileWriteAdv(&sd_image[disk], buffer[disk], sz);
 						}
 					}
 				}
-				else if (c & 0x0701)
+			}
+			else if (op & 1)
+			{
+				uint32_t buf_n = sizeof(buffer[0]) >> blkpow;
+				//printf("SD RD (%llu,%d) on %d, WIDE=%d\n", lba, sz, disk, fio_size);
+
+				int done = 0;
+				uint32_t offset;
+
+				if ((buffer_lba[disk] == (uint64_t)-1) || lba < buffer_lba[disk] || (lba + blksz - buffer_lba[disk]) > buf_n)
 				{
-					int disk = 3;
-					if (c & 0x0001) disk = 0;
-					else if (c & 0x0100) disk = 1;
-					else if (c & 0x0200) disk = 2;
-
-					//printf("SD RD %d on %d, WIDE=%d\n", lba, disk, fio_size);
-
-					int done = 0;
-					uint32_t offset;
-
-					if ((buffer_lba[disk] == (uint64_t)-1) || lba < buffer_lba[disk] || lba >(buffer_lba[disk] + buf_sz - 1))
+					buffer_lba[disk] = -1;
+					if (sd_image[disk].size)
 					{
-						buffer_lba[disk] = -1;
-						if (sd_image[disk].size)
+						diskled_on();
+						if (FileSeek(&sd_image[disk], lba << blkpow, SEEK_SET))
 						{
-							diskled_on();
-							if (FileSeekLBA(&sd_image[disk], lba))
+							if (FileReadAdv(&sd_image[disk], buffer[disk], sizeof(buffer[disk])))
 							{
-								if (FileReadAdv(&sd_image[disk], buffer[disk], sizeof(buffer[disk])))
-								{
-									done = 1;
-									buffer_lba[disk] = lba;
-								}
+								done = 1;
+								buffer_lba[disk] = lba;
 							}
 						}
+					}
 
-						//Even after error we have to provide the block to the core
-						//Give an empty block.
-						if (!done)
+					//Even after error we have to provide the block to the core
+					//Give an empty block.
+					if (!done)
+					{
+						if (sd_image[disk].type == 2)
 						{
-							if (sd_image[disk].type == 2)
+							if (is_megacd())
 							{
-								if (is_megacd())
+								mcd_fill_blanksave(buffer[disk], lba);
+							}
+							else if (is_pce())
+							{
+								memset(buffer[disk], 0, sizeof(buffer[disk]));
+								if (!lba)
 								{
-									mcd_fill_blanksave(buffer[disk], lba);
-								}
-								else if (is_pce())
-								{
-									memset(buffer[disk], 0, sizeof(buffer[disk]));
-									if (!lba)
-									{
-										memcpy(buffer[disk], "HUBM\x00\x88\x10\x80", 8);
-									}
-								}
-								else
-								{
-									memset(buffer[disk], -1, sizeof(buffer[disk]));
+									memcpy(buffer[disk], "HUBM\x00\x88\x10\x80", 8);
 								}
 							}
 							else
 							{
-								memset(buffer[disk], 0, sizeof(buffer[disk]));
+								memset(buffer[disk], -1, sizeof(buffer[disk]));
 							}
-						}
-
-						offset = 0;
-					}
-					else
-					{
-						offset = (lba - buffer_lba[disk])*512;
-						done = 1;
-					}
-
-					//hexdump(buffer, 32, 0);
-
-					// data is now stored in buffer. send it to fpga
-					EnableIO();
-					spi_w(UIO_SECTOR_RD | ((c & 4) ? 0 : ((disk + 1) << 8)));
-					spi_block_write(buffer[disk] + offset, fio_size);
-					DisableIO();
-
-					if (sd_image[disk].type == 2)
-					{
-						buffer_lba[disk] = -1;
-					}
-					else if(done && (lba == (buffer_lba[disk] + buf_sz - 1)))
-					{
-						diskled_on();
-						if (FileReadAdv(&sd_image[disk], buffer[disk], sizeof(buffer[disk])))
-						{
-							buffer_lba[disk] += buf_sz;
 						}
 						else
 						{
 							memset(buffer[disk], 0, sizeof(buffer[disk]));
-							buffer_lba[disk] = -1;
 						}
 					}
+
+					offset = 0;
 				}
-				else break;
+				else
+				{
+					offset = (lba - buffer_lba[disk]) << blkpow;
+					done = 1;
+				}
+
+				// data is now stored in buffer. send it to fpga
+				EnableIO();
+				spi_w(UIO_SECTOR_RD | ack);
+				spi_block_write(buffer[disk] + offset, fio_size, sz);
+				DisableIO();
+
+				if (sd_image[disk].type == 2)
+				{
+					buffer_lba[disk] = -1;
+				}
+				else if(done && (lba + blksz - buffer_lba[disk]) == buf_n)
+				{
+					diskled_on();
+					if (FileReadAdv(&sd_image[disk], buffer[disk], sizeof(buffer[disk])))
+					{
+						buffer_lba[disk] += buf_n;
+					}
+					else
+					{
+						memset(buffer[disk], 0, sizeof(buffer[disk]));
+						buffer_lba[disk] = -1;
+					}
+				}
 			}
+			else break;
 		}
 	}
 
